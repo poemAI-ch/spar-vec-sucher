@@ -47,7 +47,6 @@ void search(int dim, int num_vectors, int top_k, float *search_vector, char *fil
     }
 
     char *ptr = mmap(NULL, statbuf.st_size,
-                     // PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
                      PROT_READ, MAP_SHARED, fd, 0);
     if (ptr == MAP_FAILED)
     {
@@ -66,7 +65,6 @@ void search(int dim, int num_vectors, int top_k, float *search_vector, char *fil
         best_scores[i] = 1e9;
         best_indices[i] = -1;
     }
-
 
     struct timespec time1, time2;
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time1);
@@ -105,7 +103,6 @@ void search(int dim, int num_vectors, int top_k, float *search_vector, char *fil
         fptr += DIM;
         // printf("Score => %f\n",score);
     }
-
 
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time2);
 
@@ -156,56 +153,113 @@ void search(int dim, int num_vectors, int top_k, float *search_vector, char *fil
     *o_best_scores = best_scores;
 }
 
-
-static PyObject *py_search(PyObject *self, PyObject *args)
+typedef struct
 {
-    // void search(int dim, int num_vectors, int top_k, float *search_vector, char * filename, int **o_best_indices, float ** o_best_scores)
+    PyObject_HEAD
+        /* Type-specific fields go here. */
 
-    int result;
+        int dim;
     char *filename;
     int num_vectors;
-    int top_k;
+    char *ptr;
+    size_t map_size;
 
+} SparVecSucherObject;
+
+static PyObject *SparVecSucher_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    SparVecSucherObject *self;
+    self = (SparVecSucherObject *)type->tp_alloc(type, 0);
+
+    if (self != NULL)
+    {
+        self->dim = 0;
+        self->filename = NULL;
+        self->num_vectors = 0;
+        self->ptr = NULL;
+    }
+    return (PyObject *)self;
+}
+
+static void SparVecSucher_dealloc(SparVecSucherObject *self)
+{
+    int err = munmap(self->ptr, self->map_size);
+    
+    
+
+    Py_TYPE(self)->tp_free((PyObject *)self);
+    if (err != 0) {
+        // set python error
+        PyErr_SetString(PyExc_ValueError, "UnMapping Failed");
+    }
+}
+
+static int SparVecSucher_init(SparVecSucherObject *self, PyObject *args, PyObject *kwds)
+{
+    char *filename;
+    int num_vectors;
+
+    if (!PyArg_ParseTuple(args, "si", &filename, &num_vectors))
+    {
+        return -1;
+    }
+    self->filename = filename;
+    self->num_vectors = num_vectors;
+    self->dim = 1536;
+
+    const char *filepath = filename;
+    int fd = open(filepath, O_RDWR);
+    if (fd < 0)
+    {
+        PyErr_SetString(PyExc_ValueError, "File not found");
+        return -1;
+    }
+
+    struct stat statbuf;
+    int err = fstat(fd, &statbuf);
+    if (err < 0)
+    {
+        PyErr_SetString(PyExc_ValueError, "File not found, fstat failed");
+        return -1;
+    }
+    char *ptr = mmap(NULL, statbuf.st_size,
+                     PROT_READ, MAP_SHARED, fd, 0);
+    if (ptr == MAP_FAILED)
+    {
+        PyErr_SetString(PyExc_ValueError, "mmap failed");
+        return -1;
+    }
+    self->ptr = ptr;
+    self->map_size = statbuf.st_size;
+    close(fd);
+    return 0;
+}
+
+static PyObject * SparVecSucher_search(SparVecSucherObject *self, PyObject *args, PyObject *kwds)
+{
     npy_intp *shape;
-    double *data;
-    PyObject *obj = NULL;  // Temporary object for parsing
+    float *data;
+    int top_k;
+    PyObject *obj = NULL; // Temporary object for parsing
 
 
+    printf("Searching...\n");
 
-
-    // Parse all arguments at once
-    // if (!PyArg_ParseTuple(args, "iiO!s", &num_vectors, &top_k, &PyArray_Type, &search_vector, &filename)) {
-
-    printf("The type of the args is : %s\n",Py_TYPE(args)->tp_name);
-    printf("The number of args is : %d\n",PyTuple_Size(args));
-
-    obj = PyTuple_GetItem(args,0);
-    num_vectors = PyLong_AsLong(PyTuple_GetItem(args,1));
-    top_k = PyLong_AsLong(PyTuple_GetItem(args,2));
-    filename = PyUnicode_AsUTF8(PyTuple_GetItem(args,3));
-    
-    printf("The type of the obj is : %s\n",Py_TYPE(obj)->tp_name);
-    printf("The type of the num_vectors is : %s\n",Py_TYPE(PyTuple_GetItem(args,1))->tp_name);
-    printf("The type of the top_k is : %s\n",Py_TYPE(PyTuple_GetItem(args,2))->tp_name);
-    printf("The type of the filename is : %s\n",Py_TYPE(PyTuple_GetItem(args,3))->tp_name);
-
-
-    //if (!PyArg_ParseTuple(args, "Oiis",&obj, &num_vectors, &top_k, &filename )) {
-    //     return NULL;
-   //  }
-    // Ensure the object is a NumPy array
-
-    
-    if (!PyArray_Check(obj)) {
+    if (!PyArg_ParseTuple(args, "Oi", &obj, &top_k))
+    {
+        Py_INCREF(Py_None);
+        return Py_None;
+    }
+    if (!PyArray_Check(obj))
+    {
         PyErr_SetString(PyExc_TypeError, "Expected a NumPy array.");
         return NULL;
     }
     PyArrayObject *search_vector = (PyArrayObject *)obj;
 
-
     search_vector = (PyArrayObject *)PyArray_FROM_OTF((PyObject *)search_vector,
-                                                    NPY_DOUBLE,
-                                                    NPY_ARRAY_IN_ARRAY);
+                                                      NPY_FLOAT32,
+                                                      NPY_ARRAY_IN_ARRAY);
     if (search_vector == NULL)
     {
         return NULL;
@@ -221,6 +275,153 @@ static PyObject *py_search(PyObject *self, PyObject *args)
         return NULL;
     }
 
+
+    printf("Parsed\n");
+
+    if (!PyArray_Check(search_vector))
+    {
+        PyErr_SetString(PyExc_TypeError, "Expected a NumPy array.");
+        return NULL;
+    }
+    printf("Serching top %d\n", top_k);
+
+    float *best_scores = malloc(top_k * sizeof(float));
+    int *best_indices = malloc(top_k * sizeof(int));
+    printf("best scores allocated\n");
+    int dim = self->dim;
+    int num_vectors = self->num_vectors;
+    const float *fptr = (float *)self->ptr;
+
+    float *vec1 = data;
+
+    for (int i = 0; i < top_k; i++)
+    {
+        best_scores[i] = 1e9;
+        best_indices[i] = -1;
+    }
+
+    printf("Init done\n");
+
+    struct timespec time1, time2;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time1);
+
+    for (int i = 0; i < dim; i++)
+    {
+        vec1[i] = data[i];
+    }
+
+    for (int i = 0; i < top_k; i++)
+    {
+        best_scores[i] = 1e9;
+        best_indices[i] = -1;
+    }
+
+    for (int index = 0; index < num_vectors; index++)
+    {
+        float score = dot_product(fptr, vec1);
+        score = 1 - score;
+
+        for (int i = 0; i < top_k; i++)
+        {
+            if (score < best_scores[i])
+            {
+                for (int j = top_k - 1; j > i; j--)
+                {
+                    best_scores[j] = best_scores[j - 1];
+                    best_indices[j] = best_indices[j - 1];
+                }
+                best_scores[i] = score;
+                best_indices[i] = index;
+                break;
+            }
+        }
+        fptr += dim;
+    }
+
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time2);
+
+    printf("Best Scores =>\n");
+    for (int i = 0; i < top_k; i++)
+    {
+        printf("%f ", best_scores[i]);
+    }
+    printf("\nBest Indices =>\n");
+    for (int i = 0; i < top_k; i++)
+    {
+        printf("%d ", best_indices[i]);
+    }
+    double elapsed = (time2.tv_sec - time1.tv_sec) * 1e3 + (time2.tv_nsec - time1.tv_nsec) / 1e6;
+    printf("\nTime taken: %f ms\n", elapsed);
+
+    Py_INCREF(Py_None);
+    return Py_None;
+}
+
+static PyMethodDef SparVecSucher_methods[] = {
+    {"search", (PyCFunction)SparVecSucher_search, METH_VARARGS,
+     "Search the vector"},
+
+    {NULL} /* Sentinel */
+};
+
+static PyTypeObject SparVecSucherType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+        .tp_name = "c_module.SparVecSucher",
+    .tp_doc = "Memory mapped file for vector search",
+    .tp_basicsize = sizeof(SparVecSucherObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = SparVecSucher_new,
+    .tp_dealloc = (destructor)SparVecSucher_dealloc,
+    .tp_methods = SparVecSucher_methods,
+    .tp_init = (initproc)SparVecSucher_init,
+};
+
+static PyObject *py_search(PyObject *self, PyObject *args)
+{
+    // void search(int dim, int num_vectors, int top_k, float *search_vector, char * filename, int **o_best_indices, float ** o_best_scores)
+
+    int result;
+    char *filename;
+    int num_vectors;
+    int top_k;
+
+    npy_intp *shape;
+    double *data;
+    PyObject *obj = NULL; // Temporary object for parsing
+
+    // Parse all arguments at once
+    if (!PyArg_ParseTuple(args, "Oisi", &obj, &top_k, &filename, &num_vectors))
+    {
+        return NULL;
+    }
+
+    // Ensure the object is a NumPy array
+
+    if (!PyArray_Check(obj))
+    {
+        PyErr_SetString(PyExc_TypeError, "Expected a NumPy array.");
+        return NULL;
+    }
+    PyArrayObject *search_vector = (PyArrayObject *)obj;
+
+    search_vector = (PyArrayObject *)PyArray_FROM_OTF((PyObject *)search_vector,
+                                                      NPY_DOUBLE,
+                                                      NPY_ARRAY_IN_ARRAY);
+    if (search_vector == NULL)
+    {
+        return NULL;
+    }
+
+    data = (double *)PyArray_DATA(search_vector);
+    shape = PyArray_SHAPE(search_vector);
+    int n = shape[0]; // Assuming a 1D array for simplicity
+    if (n != DIM)
+    {
+        PyErr_SetString(PyExc_ValueError, "Array must be of size 1536");
+        Py_DECREF(search_vector);
+        return NULL;
+    }
 
     float *best_scores;
     int *best_indices;
@@ -242,15 +443,32 @@ static PyMethodDef c_module_methods[] = {
 static struct PyModuleDef c_module_definition = {
     PyModuleDef_HEAD_INIT,
     "c_module",
-    "A Python module that provides square function from C code.",
+    "The module that contains the c code for the vector search.",
     -1,
     c_module_methods};
 
 // Initialization function for the module
 PyMODINIT_FUNC PyInit_c_module(void)
 {
+
+    PyObject *m;
+    if (PyType_Ready(&SparVecSucherType) < 0)
+        return NULL;
+
+    m = PyModule_Create(&c_module_definition);
+    if (m == NULL)
+        return NULL;
+
+    Py_INCREF(&SparVecSucherType);
+    if (PyModule_AddObject(m, "SparVecSucher", (PyObject *)&SparVecSucherType) < 0)
+    {
+        Py_DECREF(&SparVecSucherType);
+        Py_DECREF(m);
+        return NULL;
+    }
+
     // Initialize NumPy API
     import_array();
 
-    return PyModule_Create(&c_module_definition);
+    return m;
 }
